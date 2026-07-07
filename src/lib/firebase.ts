@@ -6,13 +6,13 @@ import type { Channel } from '@/types';
 // WARNING: It is strongly recommended to use environment variables for your Firebase config.
 // Hardcoding credentials is not secure.
 const firebaseConfig = {
-  apiKey: "AIzaSyAXalpYqfPd0RSDq0suAvfSbka6AEVY_LI",
-  authDomain: "canalestv-7a89a.firebaseapp.com",
-  projectId: "canalestv-7a89a",
-  storageBucket: "canalestv-7a89a.appspot.com",
-  messagingSenderId: "440090852573",
-  appId: "1:440090852573:web:82c845a934dab773e7af34",
-  measurementId: "G-JS1JCTW73C"
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY ?? "AIzaSyAXalpYqfPd0RSDq0suAvfSbka6AEVY_LI",
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN ?? "canalestv-7a89a.firebaseapp.com",
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? "canalestv-7a89a",
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET ?? "canalestv-7a89a.appspot.com",
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID ?? "440090852573",
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID ?? "1:440090852573:web:82c845a934dab773e7af34",
+  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID ?? "G-JS1JCTW73C"
 };
 
 let app;
