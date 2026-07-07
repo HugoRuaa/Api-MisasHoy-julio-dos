@@ -1,13 +1,13 @@
 
 
 import { db, getAllChannels } from './firebase';
-import { collection, query, where, getDocs, QueryDocumentSnapshot, DocumentData, doc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, writeBatch } from 'firebase/firestore';
 import type { Channel, Video } from '@/types';
 import { formatDuration } from './utils';
-import { subHours, isAfter, isToday } from 'date-fns';
+import { subHours, isAfter, startOfDay, endOfDay } from 'date-fns';
 
 // ====== Config YouTube (usa variables de entorno si es posible) ======
-const YOUTUBE_API_KEY = (process.env.NEXT_PUBLIC_YT_API_KEY || process.env.YT_API_KEY) ?? "AIzaSyC-KHsZOz99OID7Bf-ez3LD_DhIgI7j6CM";
+const YOUTUBE_API_KEY = process.env.NEXT_PUBLIC_YT_API_KEY || process.env.YT_API_KEY;
 const YOUTUBE_API_ENDPOINT = "https://www.googleapis.com/youtube/v3";
 const KEYWORDS = ["misa", "eucaristía", "eucaristia", "mass", "masstoday", "masse", "massa", "messe", "missa", "messa"];
 
@@ -125,103 +125,59 @@ async function getChannelUploadsPlaylistItems(channelId: string, { pageMax = 1, 
 }
 
 
-// ====== YouTube: detalles del video ======
-async function getVideoDetails(videoId: string): Promise<Omit<Video, 'channelInfo' | 'order'> | null> {
-  if (!videoId) return null;
+// ====== YouTube: detalles de videos en lote ======
+async function getVideosDetailsBatch(
+  videoIds: string[]
+): Promise<Map<string, Omit<Video, 'channelInfo' | 'order'>>> {
+  const resultMap = new Map<string, Omit<Video, 'channelInfo' | 'order'>>();
+  const uniqueIds = Array.from(new Set(videoIds)).filter(Boolean);
+  if (uniqueIds.length === 0) return resultMap;
 
-  const url = new URL(`${YOUTUBE_API_ENDPOINT}/videos`);
-  url.searchParams.set('part', 'snippet,contentDetails,liveStreamingDetails');
-  url.searchParams.set('id', videoId);
-  url.searchParams.set('key', YOUTUBE_API_KEY as string);
+  const chunks: string[][] = [];
+  for (let i = 0; i < uniqueIds.length; i += 50) {
+    chunks.push(uniqueIds.slice(i, i + 50));
+  }
 
-  try {
-    // Cache más fresco (1 h). Si necesitas aún más inmediatez, bájalo.
-    const response = await fetch(url.toString(), { next: { revalidate: 3600 } });
-    if (!response.ok) {
-      if (response.status === 403 || response.status === 404) {
-        console.log(`Could not fetch details for video ${videoId} (status: ${response.status}). It might be private or deleted.`);
-      } else {
-        console.error(`YouTube API video details error for video ${videoId}: ${response.statusText}`);
-      }
-      return null;
+  for (const chunk of chunks) {
+    const idsString = chunk.join(',');
+    const url = new URL(`${YOUTUBE_API_ENDPOINT}/videos`);
+    url.searchParams.set('part', 'snippet,contentDetails,liveStreamingDetails');
+    url.searchParams.set('id', idsString);
+    if (YOUTUBE_API_KEY) {
+      url.searchParams.set('key', YOUTUBE_API_KEY);
     }
 
-    const data = await response.json();
-    if (!data.items || data.items.length === 0) return null;
+    try {
+      const response = await fetch(url.toString(), { next: { revalidate: 3600 } });
+      if (!response.ok) {
+        console.error(`YouTube API batch video details error: ${response.statusText}`);
+        continue;
+      }
 
-    const item = data.items[0];
-    const durationISO = item.contentDetails?.duration as string | undefined;
-    const duration = durationISO ? formatDuration(durationISO) : "En vivo";
-
-    return {
-      id: item.id,
-      title: item.snippet.title,
-      url: `https://www.youtube.com/watch?v=${item.id}`,
-      thumbnail:
-        item.snippet.thumbnails?.high?.url ||
-        item.snippet.thumbnails?.medium?.url ||
-        item.snippet.thumbnails?.default?.url,
-      publishedAt: item.snippet.publishedAt,
-      duration: duration,
-    };
-  } catch (error) {
-    console.error(`Failed to fetch details for video ${videoId}:`, error);
-    return null;
-  }
-}
-
-// ====== Firestore: actualización robusta del doc del canal ======
-async function updateChannelVideoDetailsRobust(channel: Channel, videoDetails: Partial<Video>) {
-  if (!channel || !videoDetails) return;
-
-  // Primero intentamos con channel.id asumiendo que es el docId real:
-  const tryByDocId = async () => {
-    const ref = doc(db, "Misascanales", String(channel.id));
-    await updateDoc(ref, {
-      ultimoVideoId: videoDetails.id,
-      ultimoVideoTitulo: videoDetails.title,
-      ultimoVideoUrl: videoDetails.url,
-      ultimoVideoThumbnail: videoDetails.thumbnail,
-      ultimoVideoFechaPublicacion: videoDetails.publishedAt,
-      ultimoVideoDuracion: videoDetails.duration,
-    });
-    console.log(`Document ${channel.id} updated successfully with video details.`);
-  };
-
-  // Fallback: buscar por campo de ID de canal (IDCanal o channelId)
-  const tryByQuery = async () => {
-    // Ajusta el nombre del campo según tu schema real
-    const fieldNames = ["IDCanal", "channelId", "idCanal"];
-    for (const field of fieldNames) {
-      const q = query(collection(db, "Misascanales"), where(field, "==", channel.channelId));
-      const snap = await getDocs(q);
-      if (!snap.empty) {
-        // Usa el primer match
-        const ref = snap.docs[0].ref;
-        await updateDoc(ref, {
-          ultimoVideoId: videoDetails.id,
-          ultimoVideoTitulo: videoDetails.title,
-          ultimoVideoUrl: videoDetails.url,
-          ultimoVideoThumbnail: videoDetails.thumbnail,
-          ultimoVideoFechaPublicacion: videoDetails.publishedAt,
-          ultimoVideoDuracion: videoDetails.duration,
+      const data = await response.json();
+      const items = data.items || [];
+      for (const item of items) {
+        const durationISO = item.contentDetails?.duration as string | undefined;
+        const duration = durationISO ? formatDuration(durationISO) : "En vivo";
+        resultMap.set(item.id, {
+          id: item.id,
+          title: item.snippet.title,
+          url: `https://www.youtube.com/watch?v=${item.id}`,
+          thumbnail:
+            item.snippet.thumbnails?.high?.url ||
+            item.snippet.thumbnails?.medium?.url ||
+            item.snippet.thumbnails?.default?.url ||
+            'https://placehold.co/600x400.png',
+          publishedAt: item.snippet.publishedAt,
+          duration: duration,
         });
-        console.log(`Document (${field} match) updated successfully with video details.`);
-        return true;
       }
-    }
-    return false;
-  };
-
-  try {
-    await tryByDocId();
-  } catch (e) {
-    console.warn(`Update by docId failed for channel ${channel.channelId}. Trying by query...`, e);
-    const ok = await tryByQuery();
-    if (!ok) {
-      console.error(`Failed to update any document for channel ${channel.channelId}. Verify schema/IDs.`);
+    } catch (error) {
+      console.error(`Failed to fetch batch details for videos:`, error);
     }
   }
+
+  return resultMap;
 }
 
 // ====== Orquestación: actualizar todos los canales ======
@@ -231,82 +187,117 @@ export async function updateAllChannels(): Promise<string> {
   let failedCount = 0;
   let skippedCount = 0;
 
-  const jobs = channels.map(async (channel) => {
-    try {
-      // Se eliminó la optimización para consultar siempre el video más reciente del día.
-      const channelVideos = await getChannelUploadsPlaylistItems(channel.channelId, { pageMax: 1, pageSize: 20 });
-      if (channelVideos.length === 0) {
-        skippedCount++;
-        return;
-      }
+  const CHUNK_SIZE = 10;
+  const candidates: Array<{ channel: Channel; candidate: any }> = [];
 
-      // Filtra por keywords en título o descripción
-      const candidate = filterVideoLocallyPlus(channelVideos, KEYWORDS);
-
-      if (candidate && candidate.id) {
-        // Solo actualizar si el video es diferente al que ya está guardado
-        if(channel.ultimoVideoId !== candidate.id) {
-            const details = await getVideoDetails(candidate.id);
-            if (details) {
-              await updateChannelVideoDetailsRobust(channel, details);
-              updatedCount++;
-            } else {
-              failedCount++;
-            }
-        } else {
+  // Paso 1: Obtener playlists de canales con concurrencia controlada
+  for (let i = 0; i < channels.length; i += CHUNK_SIZE) {
+    const chunk = channels.slice(i, i + CHUNK_SIZE);
+    const chunkJobs = chunk.map(async (channel) => {
+      try {
+        const channelVideos = await getChannelUploadsPlaylistItems(channel.channelId, { pageMax: 1, pageSize: 20 });
+        if (channelVideos.length > 0) {
+          const candidate = filterVideoLocallyPlus(channelVideos, KEYWORDS);
+          if (candidate && candidate.id && channel.ultimoVideoId !== candidate.id) {
+            candidates.push({ channel, candidate });
+          } else {
             skippedCount++;
+          }
+        } else {
+          skippedCount++;
         }
-      } else {
-        skippedCount++;
+      } catch (error) {
+        console.error(`Error processing playlist for channel ${channel.channelId}:`, error);
+        failedCount++;
       }
-    } catch (error) {
-      console.error(`Error processing channel ${channel.channelId}:`, error);
-      failedCount++;
+    });
+    await Promise.all(chunkJobs);
+  }
+
+  // Paso 2: Consultar detalles en lote desde YouTube
+  if (candidates.length > 0) {
+    const candidateVideoIds = candidates.map(c => c.candidate.id);
+    const detailsMap = await getVideosDetailsBatch(candidateVideoIds);
+
+    // Paso 3: Actualizar Firestore en un lote (batch) de escritura único
+    const batch = writeBatch(db);
+    let batchWriteCount = 0;
+
+    for (const { channel, candidate } of candidates) {
+      const details = detailsMap.get(candidate.id);
+      if (details) {
+        const ref = doc(db, "Misascanales", String(channel.id));
+        batch.update(ref, {
+          ultimoVideoId: details.id,
+          ultimoVideoTitulo: details.title,
+          ultimoVideoUrl: details.url,
+          ultimoVideoThumbnail: details.thumbnail,
+          ultimoVideoFechaPublicacion: details.publishedAt,
+          ultimoVideoDuracion: details.duration,
+        });
+        batchWriteCount++;
+        updatedCount++;
+      } else {
+        failedCount++;
+      }
     }
-  });
 
-  await Promise.all(jobs);
-
-  return `Actualización: ${updatedCount} nuevos, ${skippedCount} omitidos (sin cambios), ${failedCount} fallidos.`;
-}
-
-
-// ====== Lectura: videos de misa del día de hoy desde Firestore ======
-export async function getMassVideos(): Promise<Video[]> {
-  const channels = await getAllChannels();
-  const allVideos: Video[] = [];
-
-  for (const channel of channels) {
-    if (channel.ultimoVideoFechaPublicacion && channel.ultimoVideoId) {
-      const publishedDate = new Date(channel.ultimoVideoFechaPublicacion);
-      
-      // Filtra por videos publicados hoy (día de calendario)
-      if (isToday(publishedDate)) {
-        const title = (channel.ultimoVideoTitulo || '').toLowerCase();
-        const hasKeyword = hasAnyKeyword(title, KEYWORDS);
-
-        if (hasKeyword) {
-          allVideos.push({
-            id: channel.ultimoVideoId,
-            title: channel.ultimoVideoTitulo || 'Sin título',
-            url: channel.ultimoVideoUrl || '',
-            thumbnail: channel.ultimoVideoThumbnail || 'https://placehold.co/600x400.png',
-            publishedAt: channel.ultimoVideoFechaPublicacion,
-            duration: channel.ultimoVideoDuracion || 'N/D',
-            order: channel.order,
-            channelInfo: {
-              country: channel.country,
-              language: channel.language,
-            },
-          });
-        }
+    if (batchWriteCount > 0) {
+      try {
+        await batch.commit();
+        console.log(`Firestore batch commit successful for ${batchWriteCount} documents.`);
+      } catch (error) {
+        console.error("Failed to commit Firestore write batch:", error);
+        failedCount += batchWriteCount;
+        updatedCount -= batchWriteCount;
       }
     }
   }
 
+  return `Actualización: ${updatedCount} nuevos, ${skippedCount} omitidos (sin cambios), ${failedCount} fallidos.`;
+}
+
+// ====== Lectura: videos de misa del día de hoy desde Firestore ======
+export async function getMassVideos(): Promise<Video[]> {
+  const start = startOfDay(new Date()).toISOString();
+  const end = endOfDay(new Date()).toISOString();
+
+  const q = query(
+    collection(db, "Misascanales"),
+    where("ultimoVideoFechaPublicacion", ">=", start),
+    where("ultimoVideoFechaPublicacion", "<=", end)
+  );
+
+  const querySnapshot = await getDocs(q);
+  const allVideos: Video[] = [];
+
+  querySnapshot.forEach((doc) => {
+    const data = doc.data();
+    if (data.ultimoVideoId) {
+      const title = (data.ultimoVideoTitulo || '').toLowerCase();
+      const hasKeyword = hasAnyKeyword(title, KEYWORDS);
+
+      if (hasKeyword) {
+        allVideos.push({
+          id: data.ultimoVideoId,
+          title: data.ultimoVideoTitulo || 'Sin título',
+          url: data.ultimoVideoUrl || '',
+          thumbnail: data.ultimoVideoThumbnail || 'https://placehold.co/600x400.png',
+          publishedAt: data.ultimoVideoFechaPublicacion,
+          duration: data.ultimoVideoDuracion || 'N/D',
+          order: data.Orden || 999,
+          channelInfo: {
+            country: data.pais || '',
+            language: data.idioma || '',
+          },
+        });
+      }
+    }
+  });
+
   // Eliminar duplicados de forma robusta
   const uniqueVideos = Array.from(new Map(allVideos.map(video => [video.id, video])).values());
-  
+
   // Ordenar la lista final sin duplicados
   uniqueVideos.sort((a, b) => a.order - b.order);
 
@@ -344,5 +335,3 @@ export async function getChannelNameById(channelId: string): Promise<string | nu
     return null;
   }
 }
-
-    
